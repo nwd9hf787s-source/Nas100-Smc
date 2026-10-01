@@ -89,8 +89,8 @@
 </div>
 
 <script type="module">
+import { createClientAdapter } from "https://esm.sh/@spotware-web-team/sdk-external-api@latest";
 import {
-  createClientAdapter,
   handleConfirmEvent,
   registerEvent,
   getLightSymbolList,
@@ -269,12 +269,13 @@ async function loadBars(){
 
   return new Promise((resolve,reject)=>{
     const to=Date.now();
+    const from = to - (300 * 5 * 60 * 1000);
     getTrendbarList(adapter,{
       symbolId,
-      period:5,          // ProtoTimeframe.M5
+      period:5,          // ProtoOATrendbarPeriod.M5
+      fromTimestamp:from,
       toTimestamp:to,
-      count:300,
-      type:0             // REGULAR_OHLC
+      count:300
     }).pipe(
       take(1),
       tap(res=>{
@@ -337,6 +338,12 @@ $("refresh").addEventListener("click",()=>loadBars().catch(e=>setStatus(e.messag
 updateKillZones();
 setInterval(updateKillZones,30000);
 setInterval(()=>{ if(connected) loadBars().catch(()=>{}); },30000);
+setTimeout(()=>{
+  if(!connected){
+    $("connection").textContent="Not connected";
+    setStatus("cTrader did not complete the plugin handshake. Reload the plugin after updating this file.");
+  }
+},10000);
 connect();
 </script>
 </body>
