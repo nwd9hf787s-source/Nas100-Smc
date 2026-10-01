@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NAS100 SMC Assistant</title>
+<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;background:#0f1117;color:#f5f7fb;font-family:Arial,Helvetica,sans-serif}
+  .wrap{padding:14px;max-width:720px;margin:auto}
+  h1{font-size:20px;margin:0 0 4px}
+  .muted{color:#8e98a8;font-size:12px}
+  .top{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:12px}
+  .pill{padding:6px 9px;border-radius:999px;background:#202532;font-size:12px}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .card{background:#191d26;border:1px solid #292f3b;border-radius:12px;padding:12px}
+  .wide{grid-column:1/-1}
+  .label{font-size:11px;color:#8e98a8;text-transform:uppercase;letter-spacing:.08em;margin-bottom:7px}
+  .value{font-size:17px;font-weight:700}
+  .small{font-size:13px}
+  .bull{color:#35d07f}.bear{color:#ff5d6c}.neutral{color:#f0b84b}
+  .row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-bottom:1px solid #252a34}
+  .row:last-child{border-bottom:0}
+  button{width:100%;border:0;border-radius:9px;padding:11px;background:#2b6ff3;color:white;font-weight:700}
+  button:disabled{opacity:.5}
+  .status{margin-top:10px;min-height:18px}
+  .note{font-size:11px;line-height:1.45;color:#9ba4b3;margin-top:10px}
+  @media(max-width:430px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <h1>NAS100 SMC Assistant</h1>
+      <div class="muted">BOS • CHoCH • Liquidity • FVG • Order Block</div>
+    </div>
+    <div id="connection" class="pill">Connecting…</div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Symbol</div>
+      <div id="symbol" class="value">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Price</div>
+      <div id="price" class="value">—</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Structure</div>
+      <div id="structure" class="value neutral">Waiting</div>
+    </div>
+    <div class="card">
+      <div class="label">Bias</div>
+      <div id="bias" class="value neutral">Waiting</div>
+    </div>
+
+    <div class="card wide">
+      <div class="label">SMC Conditions</div>
+      <div class="row"><span>BOS</span><strong id="bos">—</strong></div>
+      <div class="row"><span>CHoCH</span><strong id="choch">—</strong></div>
+      <div class="row"><span>Liquidity sweep</span><strong id="sweep">—</strong></div>
+      <div class="row"><span>Fair Value Gap</span><strong id="fvg">—</strong></div>
+      <div class="row"><span>Order Block</span><strong id="ob">—</strong></div>
+      <div class="row"><span>Premium / Discount</span><strong id="pd">—</strong></div>
+    </div>
+
+    <div class="card">
+      <div class="label">London Kill Zone</div>
+      <div id="london" class="value small">—</div>
+    </div>
+    <div class="card">
+      <div class="label">New York Kill Zone</div>
+      <div id="ny" class="value small">—</div>
+    </div>
+
+    <div class="card wide">
+      <button id="refresh" disabled>Refresh NAS100 analysis</button>
+      <div id="status" class="status muted">Waiting for cTrader connection…</div>
+      <div class="note">
+        Analysis is rule-based and educational. It is not a guarantee of future price movement.
+        This version does not place trades automatically.
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import {
+  createClientAdapter,
+  handleConfirmEvent,
+  registerEvent,
+  getLightSymbolList,
+  getTrendbarList,
+  subscribeQuotes,
+  quoteEvent
+} from "https://esm.sh/@spotware-web-team/sdk@latest";
+
+import { take, tap, catchError } from "https://esm.sh/rxjs@7.8.2";
+import { createLogger } from "https://esm.sh/@veksa/logger@latest";
+
+const params = new URLSearchParams(location.search);
+const requestedSymbol = (params.get("symbol") || "NAS100").toUpperCase();
+
+let adapter = null;
+let connected = false;
+let symbolId = null;
+let digits = 2;
+let bars = [];
+let lastPrice = null;
+
+const $ = id => document.getElementById(id);
+
+function setStatus(msg){ $("status").textContent = msg; }
+
+function cls(el, type){
+  el.className = "value " + (type || "neutral");
+}
+
+function fmt(n){
+  if(n == null || Number.isNaN(n)) return "—";
+  return Number(n).toFixed(digits);
+}
+
+function toBar(x){
+  const low = Number(x.low) / 100000;
+  return {
+    t: Number(x.utcTimestampInMinutes) * 60000,
+    low,
+    open: low + Number(x.deltaOpen || 0) / 100000,
+    close: low + Number(x.deltaClose || 0) / 100000,
+    high: low + Number(x.deltaHigh || 0) / 100000,
+    volume: Number(x.volume || 0)
+  };
+}
+
+function pivots(data){
+  const highs=[], lows=[];
+  for(let i=2;i<data.length-2;i++){
+    if(data[i].high > data[i-1].high && data[i].high > data[i-2].high &&
+       data[i].high >= data[i+1].high && data[i].high >= data[i+2].high) highs.push({i,p:data[i].high});
+    if(data[i].low < data[i-1].low && data[i].low < data[i-2].low &&
+       data[i].low <= data[i+1].low && data[i].low <= data[i+2].low) lows.push({i,p:data[i].low});
+  }
+  return {highs,lows};
+}
+
+function analyse(data){
+  if(data.length < 20) throw new Error("Not enough bars returned.");
+
+  const {highs,lows}=pivots(data);
+  const last=data[data.length-1];
+  const prev=data[data.length-2];
+
+  const lastHigh=highs.at(-1);
+  const lastLow=lows.at(-1);
+  const priorHigh=highs.at(-2);
+  const priorLow=lows.at(-2);
+
+  let structure="RANGE", bias="NEUTRAL", bos="None", choch="None";
+
+  if(lastHigh && last.close > lastHigh.p){
+    structure="BULLISH BOS"; bias="BULLISH"; bos="Bullish";
+  } else if(lastLow && last.close < lastLow.p){
+    structure="BEARISH BOS"; bias="BEARISH"; bos="Bearish";
+  } else if(priorHigh && last.close > priorHigh.p){
+    structure="BULLISH"; bias="BULLISH";
+  } else if(priorLow && last.close < priorLow.p){
+    structure="BEARISH"; bias="BEARISH";
+  }
+
+  // CHoCH: a break in the opposite direction of the most recent simple bias.
+  if(lastHigh && prev.close <= lastHigh.p && last.close > lastHigh.p && bias==="BEARISH") choch="Bullish";
+  if(lastLow && prev.close >= lastLow.p && last.close < lastLow.p && bias==="BULLISH") choch="Bearish";
+
+  // Liquidity sweep: wick through a recent pivot, close back inside.
+  let sweep="None";
+  if(lastHigh && last.high > lastHigh.p && last.close < lastHigh.p) sweep="Buy-side swept";
+  if(lastLow && last.low < lastLow.p && last.close > lastLow.p) sweep="Sell-side swept";
+
+  // Most recent 3-candle FVG.
+  let fvg="None";
+  for(let i=data.length-3;i>=0;i--){
+    const a=data[i], c=data[i+2];
+    if(c.low > a.high){ fvg=`Bullish ${fmt(a.high)}–${fmt(c.low)}`; break; }
+    if(c.high < a.low){ fvg=`Bearish ${fmt(c.high)}–${fmt(a.low)}`; break; }
+  }
+
+  // Simple order-block approximation: last opposite candle before the latest break.
+  let ob="None";
+  if(bos==="Bullish"){
+    for(let i=data.length-2;i>=0;i--){
+      if(data[i].close < data[i].open){ ob=`Bullish ${fmt(data[i].low)}–${fmt(data[i].high)}`; break; }
+    }
+  } else if(bos==="Bearish"){
+    for(let i=data.length-2;i>=0;i--){
+      if(data[i].close > data[i].open){ ob=`Bearish ${fmt(data[i].low)}–${fmt(data[i].high)}`; break; }
+    }
+  }
+
+  let pd="—";
+  if(lastHigh && lastLow){
+    const mid=(lastHigh.p+lastLow.p)/2;
+    pd=last.close >= mid ? "Premium" : "Discount";
+  }
+
+  $("structure").textContent=structure;
+  cls($("structure"),bias==="BULLISH"?"bull":bias==="BEARISH"?"bear":"neutral");
+  $("bias").textContent=bias;
+  cls($("bias"),bias==="BULLISH"?"bull":bias==="BEARISH"?"bear":"neutral");
+
+  $("bos").textContent=bos;
+  $("choch").textContent=choch;
+  $("sweep").textContent=sweep;
+  $("fvg").textContent=fvg;
+  $("ob").textContent=ob;
+  $("pd").textContent=pd;
+
+  cls($("bos"),bos.includes("Bullish")?"bull":bos.includes("Bearish")?"bear":"neutral");
+  cls($("choch"),choch==="Bullish"?"bull":choch==="Bearish"?"bear":"neutral");
+  cls($("sweep"),sweep.includes("Sell")?"bull":sweep.includes("Buy")?"bear":"neutral");
+  cls($("pd"),pd==="Discount"?"bull":pd==="Premium"?"bear":"neutral");
+}
+
+function updateKillZones(){
+  const now=new Date();
+  const fmtTime=(zone)=>{
+    return new Intl.DateTimeFormat("en-GB",{timeZone:zone,hour:"2-digit",minute:"2-digit",hour12:false}).format(now);
+  };
+  const london=fmtTime("Europe/London");
+  const ny=fmtTime("America/New_York");
+  const [lh,lm]=london.split(":").map(Number);
+  const [nh,nm]=ny.split(":").map(Number);
+  const lmins=lh*60+lm, nmins=nh*60+nm;
+  $("london").textContent=(lmins>=480 && lmins<660) ? "ACTIVE" : `London ${london}`;
+  $("ny").textContent=(nmins>=830 && nmins<960) ? "ACTIVE" : `New York ${ny}`;
+  cls($("london"),(lmins>=480 && lmins<660)?"bull":"neutral");
+  cls($("ny"),(nmins>=830 && nmins<960)?"bull":"neutral");
+}
+
+async function loadSymbols(){
+  return new Promise((resolve,reject)=>{
+    getLightSymbolList(adapter,{}).pipe(
+      take(1),
+      tap(res=>{
+        const list=res.symbol || [];
+        let found=list.find(s=>String(s.name||"").toUpperCase()===requestedSymbol);
+        if(!found){
+          found=list.find(s=>String(s.name||"").toUpperCase().includes("NAS") ||
+                           String(s.name||"").toUpperCase().includes("USTEC") ||
+                           String(s.name||"").toUpperCase().includes("US100"));
+        }
+        if(!found) throw new Error("Could not find a NAS100/US100 symbol in this cTrader account.");
+        symbolId=Number(found.id);
+        $("symbol").textContent=found.name || requestedSymbol;
+        resolve(found);
+      }),
+      catchError(err=>{reject(err); return [];})
+    ).subscribe();
+  });
+}
+
+async function loadBars(){
+  if(!connected || symbolId==null) return;
+  setStatus("Loading M5 data…");
+
+  return new Promise((resolve,reject)=>{
+    const to=Date.now();
+    getTrendbarList(adapter,{
+      symbolId,
+      period:5,          // ProtoTimeframe.M5
+      toTimestamp:to,
+      count:300,
+      type:0             // REGULAR_OHLC
+    }).pipe(
+      take(1),
+      tap(res=>{
+        const raw=res.trendbar || [];
+        bars=raw.map(toBar).sort((a,b)=>a.t-b.t);
+        analyse(bars);
+        setStatus(`Updated ${new Date().toLocaleTimeString("en-GB")}`);
+        resolve();
+      }),
+      catchError(err=>{reject(err); return [];})
+    ).subscribe();
+  });
+}
+
+function connect(){
+  const logger=createLogger(false);
+  adapter=createClientAdapter({logger});
+
+  handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
+
+  registerEvent(adapter).pipe(
+    take(1),
+    tap(async ()=>{
+      handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
+      connected=true;
+      $("connection").textContent="Connected";
+      $("refresh").disabled=false;
+      try{
+        const s=await loadSymbols();
+        digits=Number.isFinite(Number(s.digits)) ? Number(s.digits) : 2;
+        await loadBars();
+        subscribeQuotes(adapter,{symbolId:[symbolId]}).pipe(take(1)).subscribe();
+        quoteEvent(adapter).pipe(
+          tap(ev=>{
+            const q=Array.isArray(ev)?ev[0]:ev;
+            if(q && Number(q.symbolId)===symbolId){
+              const bid=Number(q.bid);
+              if(Number.isFinite(bid)){
+                lastPrice=bid/100000;
+                $("price").textContent=fmt(lastPrice);
+              }
+            }
+          })
+        ).subscribe();
+      }catch(e){
+        $("connection").textContent="Error";
+        setStatus(e.message || String(e));
+      }
+    }),
+    catchError(err=>{
+      $("connection").textContent="Offline";
+      setStatus("cTrader host connection failed.");
+      console.error(err);
+      return [];
+    })
+  ).subscribe();
+}
+
+$("refresh").addEventListener("click",()=>loadBars().catch(e=>setStatus(e.message||String(e))));
+updateKillZones();
+setInterval(updateKillZones,30000);
+setInterval(()=>{ if(connected) loadBars().catch(()=>{}); },30000);
+connect();
+</script>
+</body>
+</html>
