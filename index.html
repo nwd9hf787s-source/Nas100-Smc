@@ -249,11 +249,14 @@ async function loadSymbols(){
         const list=res.symbol || [];
         let found=list.find(s=>String(s.name||"").toUpperCase()===requestedSymbol);
         if(!found){
-          found=list.find(s=>String(s.name||"").toUpperCase().includes("NAS") ||
-                           String(s.name||"").toUpperCase().includes("USTEC") ||
-                           String(s.name||"").toUpperCase().includes("US100"));
+          found=list.find(s=>{
+            const n=String(s.name||"").toUpperCase();
+            return n.includes("NAS") || n.includes("NDX100") ||
+                   n.includes("USTEC") || n.includes("US100") ||
+                   n.includes("NAS100");
+          });
         }
-        if(!found) throw new Error("Could not find a NAS100/US100 symbol in this cTrader account.");
+        if(!found) throw new Error("Could not find a NAS100/NDX100/US100/USTEC symbol in this cTrader account.");
         symbolId=Number(found.id);
         $("symbol").textContent=found.name || requestedSymbol;
         resolve(found);
