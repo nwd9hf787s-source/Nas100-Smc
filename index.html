@@ -248,12 +248,22 @@ async function loadSymbols(){
       tap(res=>{
         // Different SDK builds can expose protobuf repeated fields slightly differently.
         // Accept the documented `symbol` field plus common wrapper forms.
-        let list=[];
-        if(Array.isArray(res?.symbol)) list=res.symbol;
-        else if(res?.symbol) list=[res.symbol];
-        else if(Array.isArray(res?.symbols)) list=res.symbols;
-        else if(Array.isArray(res?.data?.symbol)) list=res.data.symbol;
-        else if(Array.isArray(res?.data?.symbols)) list=res.data.symbols;
+       let list=[];
+const toList = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value.toArray === "function") return value.toArray();
+  if (typeof value[Symbol.iterator] === "function") return Array.from(value);
+  if (typeof value === "object") {
+    if (Array.isArray(value.items)) return value.items;
+    if (Array.isArray(value.values)) return value.values;
+  }
+  return [value];
+};
+list = toList(res?.symbol);
+if (!list.length) list = toList(res?.symbols);
+if (!list.length) list = toList(res?.data?.symbol);
+if (!list.length) list = toList(res?.data?.symbols);
 
         const normalized=list.map(s=>({
           ...s,
