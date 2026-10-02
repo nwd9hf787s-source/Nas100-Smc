@@ -246,19 +246,39 @@ async function loadSymbols(){
     getLightSymbolList(adapter,{}).pipe(
       take(1),
       tap(res=>{
-        const list=res.symbol || [];
-        let found=list.find(s=>String(s.name||"").toUpperCase()===requestedSymbol);
+        // Different SDK builds can expose protobuf repeated fields slightly differently.
+        // Accept the documented `symbol` field plus common wrapper forms.
+        let list=[];
+        if(Array.isArray(res?.symbol)) list=res.symbol;
+        else if(res?.symbol) list=[res.symbol];
+        else if(Array.isArray(res?.symbols)) list=res.symbols;
+        else if(Array.isArray(res?.data?.symbol)) list=res.data.symbol;
+        else if(Array.isArray(res?.data?.symbols)) list=res.data.symbols;
+
+        const normalized=list.map(s=>({
+          ...s,
+          name:String(s?.name ?? s?.symbolName ?? s?.code ?? "").toUpperCase()
+        }));
+
+        // Prefer the exact requested symbol, then known NAS100 broker aliases.
+        let found=normalized.find(s=>s.name===requestedSymbol);
         if(!found){
-          found=list.find(s=>{
-            const n=String(s.name||"").toUpperCase();
-            return n.includes("NAS") || n.includes("NDX100") ||
-                   n.includes("USTEC") || n.includes("US100") ||
-                   n.includes("NAS100");
-          });
+          found=normalized.find(s=>
+            /^(NDX100|NAS100|US100|USTEC)$/.test(s.name) ||
+            /NAS100|NDX100|USTEC|US100/.test(s.name)
+          );
         }
-        if(!found) throw new Error("Could not find a NAS100/NDX100/US100/USTEC symbol in this cTrader account.");
-        symbolId=Number(found.id);
-        $("symbol").textContent=found.name || requestedSymbol;
+
+        if(!found){
+          const names=normalized.map(s=>s.name).filter(Boolean).slice(0,80);
+          throw new Error(`cTrader returned ${list.length} symbols, but no NAS100/NDX100/US100/USTEC was found. First symbols: ${names.join(", ")}`);
+        }
+
+        const id=Number(found.id ?? found.symbolId);
+        if(!Number.isFinite(id)) throw new Error("The NDX100 symbol was found, but cTrader did not return its symbol ID.");
+
+        symbolId=id;
+        $("symbol").textContent=found.name;
         resolve(found);
       }),
       catchError(err=>{reject(err); return [];})
